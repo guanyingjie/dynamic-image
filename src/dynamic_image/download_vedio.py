@@ -40,6 +40,18 @@ def init_database():
         )
     ''')
     
+    # 创建表：downloaded_videos 用于记录所有已下载的视频信息
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS downloaded_videos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id TEXT NOT NULL UNIQUE,
+            prompt_content TEXT,
+            prompt_content_cn TEXT,
+            download_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            file_path TEXT
+        )
+    ''')
+    
     # 检查是否需要添加新列（兼容旧版本数据库）
     cursor.execute("PRAGMA table_info(video_sequence)")
     columns = [col[1] for col in cursor.fetchall()]
@@ -130,7 +142,6 @@ def translate_to_chinese(text):
                 translated_segments.append(translator.translate(segment))
             
             translated = ' '.join(translated_segments)
-        
         print(f"✅ 翻译完成")
         return translated
     
@@ -138,6 +149,23 @@ def translate_to_chinese(text):
         print(f"⚠️  翻译失败: {e}")
         print(f"   将使用原文本")
         return text  # 如果翻译失败，返回原文本
+
+
+def save_downloaded_video(video_id, prompt_content, prompt_content_cn, file_path):
+    """保存已下载的视频信息到 downloaded_videos 表"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO downloaded_videos (video_id, prompt_content, prompt_content_cn, file_path)
+            VALUES (?, ?, ?, ?)
+        ''', (video_id, prompt_content, prompt_content_cn, file_path))
+        conn.commit()
+        print(f"✅ 已保存视频记录到数据库: {video_id}")
+    except sqlite3.IntegrityError:
+        print(f"⚠️  视频 {video_id} 已存在于数据库中")
+    finally:
+        conn.close()
 
 
 def update_sequence(video_id, prompt_content, prompt_content_cn):
@@ -172,7 +200,7 @@ def load_video_data():
 
 
 def download_video_by_id(video_id, prompt_content):
-    """根据视频 ID 下载视频"""
+    """根据视频 ID 下载视频，返回 (成功状态, 文件路径)"""
     video_url = f"https://cdn.midjourney.com/video/{video_id}/0.mp4"
     output_filename = Path(OUTPUT_DIR) / f"{video_id}.mp4"
     
@@ -194,11 +222,11 @@ def download_video_by_id(video_id, prompt_content):
 
         if response.status_code == 403:
             print("❌ 403 Forbidden - 可能该链接已失效或触发了风控")
-            return False
+            return False, None
         
         if response.status_code == 404:
             print("❌ 404 Not Found - 视频不存在")
-            return False
+            return False, None
 
         response.raise_for_status()
 
@@ -221,17 +249,17 @@ def download_video_by_id(video_id, prompt_content):
         print(f"📁 文件名: {output_filename.name}")
         print(f"📝 Prompt: {prompt_content}")
         print("-" * 80)
-        return True
+        return True, str(output_filename)
 
     except Exception as e:
         print(f"\n❌ 下载失败: {e}")
-        return False
+        return False, None
 
 
 def main():
-    """主函数"""
+    """主函数 - 一次下载5个视频"""
     print("=" * 80)
-    print("🎬 Midjourney 视频下载器")
+    print("🎬 Midjourney 视频批量下载器")
     print("=" * 80)
     
     # 1. 初始化数据库
@@ -264,38 +292,72 @@ def main():
         print(f"✅ 所有视频已下载完成! (共 {len(video_data)} 个)")
         return
     
-    # 5. 获取当前要下载的视频信息
-    video_obj = video_data[current_index]
-    video_id = video_obj.get('id')
-    prompt_content = video_obj.get('prompt', {}).get('decodedPrompt', [{}])[0].get('content', 'No prompt')
+    # 5. 批量下载5个视频
+    batch_size = 5
+    total_videos = len(video_data)
+    videos_to_download = min(batch_size, total_videos - current_index)
     
-    if not video_id:
-        print("❌ 无法获取视频 ID")
-        return
+    print(f"🎯 准备下载 {videos_to_download} 个视频 (从第 {current_index + 1} 到第 {current_index + videos_to_download})")
+    print("=" * 80)
     
-    print(f"🎯 准备下载第 {current_index + 1}/{len(video_data)} 个视频")
+    success_count = 0
+    failed_count = 0
     
-    # 6. 下载视频
-    success = download_video_by_id(video_id, prompt_content)
-    
-    # 7. 如果下载成功，翻译 Prompt 并更新序列号和视频信息
-    if success:
-        # 翻译 Prompt 为中文
-        prompt_content_cn = translate_to_chinese(prompt_content)
+    for i in range(videos_to_download):
+        video_index = current_index + i
+        video_obj = video_data[video_index]
+        video_id = video_obj.get('id')
+        prompt_content = video_obj.get('prompt', {}).get('decodedPrompt', [{}])[0].get('content', 'No prompt')
         
-        # 更新数据库
-        update_sequence(video_id, prompt_content, prompt_content_cn)
-        new_index = get_current_sequence()
+        if not video_id:
+            print(f"❌ 无法获取视频 {video_index + 1} 的 ID，跳过")
+            failed_count += 1
+            continue
         
-        # 显示翻译后的中文 Prompt
-        print(f"📝 中文 Prompt: {prompt_content_cn}")
-        print("-" * 80)
+        print(f"\n📹 [{i + 1}/{videos_to_download}] 下载第 {video_index + 1}/{total_videos} 个视频")
+        print("=" * 80)
         
-        print(f"✅ 序列号已更新: {current_index} -> {new_index}")
-        print(f"📊 已记录视频 ID: {video_id}")
-        print(f"📈 进度: {new_index}/{len(video_data)} ({int(new_index/len(video_data)*100)}%)")
+        # 下载视频
+        success, file_path = download_video_by_id(video_id, prompt_content)
+        
+        # 如果下载成功，翻译 Prompt 并保存到数据库
+        if success:
+            # 翻译 Prompt 为中文
+            # prompt_content_cn = translate_to_chinese(prompt_content)
+
+            prompt_content_cn = "skip"
+            
+            # 保存到 downloaded_videos 表
+            save_downloaded_video(video_id, prompt_content, prompt_content_cn, file_path)
+            
+            # 更新序列号（记录最新下载的视频）
+            update_sequence(video_id, prompt_content, prompt_content_cn)
+            
+            # 显示翻译后的中文 Prompt
+            print(f"📝 中文 Prompt: {prompt_content_cn}")
+            print("-" * 80)
+            
+            success_count += 1
+        else:
+            print("⚠️  下载失败，跳过该视频")
+            failed_count += 1
+            # 即使失败也更新序列号，避免重复尝试同一个视频
+            update_sequence(video_id, prompt_content, None)
+    
+    # 6. 显示下载统计
+    print("\n" + "=" * 80)
+    print("📊 下载统计:")
+    print(f"   ✅ 成功: {success_count} 个")
+    print(f"   ❌ 失败: {failed_count} 个")
+    
+    new_index = get_current_sequence()
+    print(f"   📈 总进度: {new_index}/{total_videos} ({int(new_index/total_videos*100)}%)")
+    
+    if new_index < total_videos:
+        print(f"   💡 还有 {total_videos - new_index} 个视频待下载")
     else:
-        print("⚠️  下载失败，序列号未更新。请检查后重试。")
+        print("   🎉 所有视频已下载完成！")
+    print("=" * 80)
 
 
 if __name__ == "__main__":
