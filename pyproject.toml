@@ -31,7 +31,9 @@ dependencies = [
     # Example: "pillow>=9.0.0",
     "requests",
     "curl_cffi",
-    "deep-translator>=1.11.0"
+    "deep-translator>=1.11.0",
+    "python-dotenv>=1.0.0",
+    "google-generativeai>=0.3.0",
 ]
 
 [project.optional-dependencies]

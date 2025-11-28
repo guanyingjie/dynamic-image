@@ -4,9 +4,15 @@ import json
 import sqlite3
 from pathlib import Path
 from deep_translator import GoogleTranslator
+import glob
 
-# 配置文件路径
-JSON_FILE = "images/2025-11-21.json"
+# ==================== 配置项 ====================
+# 指定要下载的分类（从分类结果文件中选择一个分类名称）
+TARGET_CATEGORY = "美女"  # 可选: 日漫风格, 奇幻，异世界风格, 科幻风格, 赛博朋克风格, 复古风格, 北欧风格, 美女, 帅哥, 动物萌宠, 情侣, 未分类
+# ==============================================
+
+# 自动查找 result 目录下最新的分类结果文件
+RESULT_DIR = "result"
 DB_FILE = "video_download.db"
 OUTPUT_DIR = "downloaded_videos"
 
@@ -25,18 +31,20 @@ headers = {
 
 
 def init_database():
-    """初始化数据库，创建表记录视频下载序列"""
+    """初始化数据库，创建表记录视频下载序列（按分类）"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
-    # 创建表：video_sequence 用于记录当前下载到第几个视频
+    # 创建表：category_sequence 用于记录每个分类的下载进度
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS video_sequence (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
+        CREATE TABLE IF NOT EXISTS category_sequence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category_name TEXT NOT NULL UNIQUE,
             current_index INTEGER NOT NULL DEFAULT 0,
             video_id TEXT,
             prompt_content TEXT,
-            prompt_content_cn TEXT
+            prompt_content_cn TEXT,
+            updated_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
@@ -45,6 +53,7 @@ def init_database():
         CREATE TABLE IF NOT EXISTS downloaded_videos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             video_id TEXT NOT NULL UNIQUE,
+            category_name TEXT,
             prompt_content TEXT,
             prompt_content_cn TEXT,
             download_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -52,47 +61,38 @@ def init_database():
         )
     ''')
     
-    # 检查是否需要添加新列（兼容旧版本数据库）
-    cursor.execute("PRAGMA table_info(video_sequence)")
+    # 检查 downloaded_videos 表是否需要添加 category_name 列
+    cursor.execute("PRAGMA table_info(downloaded_videos)")
     columns = [col[1] for col in cursor.fetchall()]
     
-    if 'video_id' not in columns:
-        cursor.execute('ALTER TABLE video_sequence ADD COLUMN video_id TEXT')
-        print("✅ 已添加 video_id 列")
-    
-    if 'prompt_content' not in columns:
-        cursor.execute('ALTER TABLE video_sequence ADD COLUMN prompt_content TEXT')
-        print("✅ 已添加 prompt_content 列")
-    
-    if 'prompt_content_cn' not in columns:
-        cursor.execute('ALTER TABLE video_sequence ADD COLUMN prompt_content_cn TEXT')
-        print("✅ 已添加 prompt_content_cn 列（中文）")
-    
-    # 如果表是空的，插入初始记录
-    cursor.execute('SELECT COUNT(*) FROM video_sequence')
-    if cursor.fetchone()[0] == 0:
-        cursor.execute('INSERT INTO video_sequence (id, current_index, video_id, prompt_content, prompt_content_cn) VALUES (1, 0, NULL, NULL, NULL)')
+    if 'category_name' not in columns:
+        cursor.execute('ALTER TABLE downloaded_videos ADD COLUMN category_name TEXT')
+        print("✅ 已添加 category_name 列到 downloaded_videos 表")
     
     conn.commit()
     conn.close()
     print("✅ 数据库初始化完成")
 
 
-def get_current_sequence():
-    """获取当前下载序列号"""
+def get_current_sequence(category_name):
+    """获取指定分类的当前下载序列号"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute('SELECT current_index FROM video_sequence WHERE id = 1')
+    cursor.execute('SELECT current_index FROM category_sequence WHERE category_name = ?', (category_name,))
     result = cursor.fetchone()
     conn.close()
     return result[0] if result else 0
 
 
-def get_last_downloaded_info():
-    """获取最后下载的视频信息"""
+def get_last_downloaded_info(category_name):
+    """获取指定分类最后下载的视频信息"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute('SELECT current_index, video_id, prompt_content, prompt_content_cn FROM video_sequence WHERE id = 1')
+    cursor.execute('''
+        SELECT current_index, video_id, prompt_content, prompt_content_cn 
+        FROM category_sequence 
+        WHERE category_name = ?
+    ''', (category_name,))
     result = cursor.fetchone()
     conn.close()
     if result:
@@ -103,6 +103,18 @@ def get_last_downloaded_info():
             'prompt_content_cn': result[3]
         }
     return None
+
+
+def init_category_if_not_exists(category_name):
+    """如果分类记录不存在，则初始化"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR IGNORE INTO category_sequence (category_name, current_index)
+        VALUES (?, 0)
+    ''', (category_name,))
+    conn.commit()
+    conn.close()
 
 
 def translate_to_chinese(text):
@@ -151,48 +163,75 @@ def translate_to_chinese(text):
         return text  # 如果翻译失败，返回原文本
 
 
-def save_downloaded_video(video_id, prompt_content, prompt_content_cn, file_path):
+def save_downloaded_video(video_id, category_name, prompt_content, prompt_content_cn, file_path):
     """保存已下载的视频信息到 downloaded_videos 表"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     try:
         cursor.execute('''
-            INSERT INTO downloaded_videos (video_id, prompt_content, prompt_content_cn, file_path)
-            VALUES (?, ?, ?, ?)
-        ''', (video_id, prompt_content, prompt_content_cn, file_path))
+            INSERT INTO downloaded_videos (video_id, category_name, prompt_content, prompt_content_cn, file_path)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (video_id, category_name, prompt_content, prompt_content_cn, file_path))
         conn.commit()
-        print(f"✅ 已保存视频记录到数据库: {video_id}")
+        print(f"✅ 已保存视频记录到数据库: {video_id} (分类: {category_name})")
     except sqlite3.IntegrityError:
         print(f"⚠️  视频 {video_id} 已存在于数据库中")
     finally:
         conn.close()
 
 
-def update_sequence(video_id, prompt_content, prompt_content_cn):
-    """更新序列号，+1，并记录视频ID、Prompt和中文Prompt"""
+def update_sequence(category_name, video_id, prompt_content, prompt_content_cn):
+    """更新指定分类的序列号，+1，并记录视频ID、Prompt和中文Prompt"""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('''
-        UPDATE video_sequence 
+        UPDATE category_sequence 
         SET current_index = current_index + 1,
             video_id = ?,
             prompt_content = ?,
-            prompt_content_cn = ?
-        WHERE id = 1
-    ''', (video_id, prompt_content, prompt_content_cn))
+            prompt_content_cn = ?,
+            updated_time = CURRENT_TIMESTAMP
+        WHERE category_name = ?
+    ''', (video_id, prompt_content, prompt_content_cn, category_name))
     conn.commit()
     conn.close()
 
 
-def load_video_data():
-    """从 JSON 文件加载视频数据"""
+def find_latest_classification_file():
+    """自动查找 result 目录下最新的分类结果文件"""
+    pattern = f"{RESULT_DIR}/classification_result_*.json"
+    files = glob.glob(pattern)
+    
+    if not files:
+        print(f"❌ 在 {RESULT_DIR} 目录下找不到分类结果文件")
+        sys.exit(1)
+    
+    # 按修改时间排序，获取最新的文件
+    latest_file = max(files, key=lambda f: Path(f).stat().st_mtime)
+    return latest_file
+
+
+def load_video_data(category_name):
+    """从 JSON 文件加载指定分类的视频数据"""
     try:
-        with open(JSON_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        print(f"✅ 成功加载 {len(data)} 个视频信息")
-        return data
-    except FileNotFoundError:
-        print(f"❌ 找不到文件: {JSON_FILE}")
+        json_file = find_latest_classification_file()
+        print(f"📁 使用文件: {json_file}")
+        
+        with open(json_file, 'r', encoding='utf-8') as f:
+            all_data = json.load(f)
+        
+        # 检查分类是否存在
+        if category_name not in all_data:
+            print(f"❌ 分类 '{category_name}' 不存在")
+            print(f"📋 可用的分类: {', '.join(all_data.keys())}")
+            sys.exit(1)
+        
+        category_data = all_data[category_name]
+        print(f"✅ 成功加载分类 '{category_name}': {len(category_data)} 个视频")
+        return category_data
+        
+    except FileNotFoundError as e:
+        print(f"❌ 找不到文件: {e}")
         sys.exit(1)
     except json.JSONDecodeError as e:
         print(f"❌ JSON 解析错误: {e}")
@@ -257,23 +296,27 @@ def download_video_by_id(video_id, prompt_content):
 
 
 def main():
-    """主函数 - 一次下载5个视频"""
+    """主函数 - 一次下载5个视频（按分类）"""
     print("=" * 80)
-    print("🎬 Midjourney 视频批量下载器")
+    print("🎬 Midjourney 视频批量下载器 (分类版)")
     print("=" * 80)
     
     # 1. 初始化数据库
     init_database()
     
-    # 2. 加载视频数据
-    video_data = load_video_data()
+    # 2. 初始化目标分类
+    init_category_if_not_exists(TARGET_CATEGORY)
+    print(f"🎯 目标分类: {TARGET_CATEGORY}")
     
-    # 3. 获取当前序列号和上次下载信息
-    current_index = get_current_sequence()
+    # 3. 加载指定分类的视频数据
+    video_data = load_video_data(TARGET_CATEGORY)
+    
+    # 4. 获取当前序列号和上次下载信息
+    current_index = get_current_sequence(TARGET_CATEGORY)
     print(f"📊 当前序列号: {current_index}")
     
     # 显示上次下载的视频信息
-    last_info = get_last_downloaded_info()
+    last_info = get_last_downloaded_info(TARGET_CATEGORY)
     if last_info and last_info['video_id'] and current_index > 0:
         print(f"📝 上次下载: {last_info['video_id']}")
         
@@ -287,13 +330,13 @@ def main():
         if prompt_cn_preview:
             print(f"   中文: {prompt_cn_preview}")
     
-    # 4. 检查是否已经下载完所有视频
+    # 5. 检查是否已经下载完所有视频
     if current_index >= len(video_data):
-        print(f"✅ 所有视频已下载完成! (共 {len(video_data)} 个)")
+        print(f"✅ '{TARGET_CATEGORY}' 分类的所有视频已下载完成! (共 {len(video_data)} 个)")
         return
     
-    # 5. 批量下载5个视频
-    batch_size = 5
+    # 6. 批量下载5个视频
+    batch_size = 20
     total_videos = len(video_data)
     videos_to_download = min(batch_size, total_videos - current_index)
     
@@ -307,7 +350,7 @@ def main():
         video_index = current_index + i
         video_obj = video_data[video_index]
         video_id = video_obj.get('id')
-        prompt_content = video_obj.get('prompt', {}).get('decodedPrompt', [{}])[0].get('content', 'No prompt')
+        prompt_content = video_obj.get('content', 'No prompt')
         
         if not video_id:
             print(f"❌ 无法获取视频 {video_index + 1} 的 ID，跳过")
@@ -328,10 +371,10 @@ def main():
             prompt_content_cn = "skip"
             
             # 保存到 downloaded_videos 表
-            save_downloaded_video(video_id, prompt_content, prompt_content_cn, file_path)
+            save_downloaded_video(video_id, TARGET_CATEGORY, prompt_content, prompt_content_cn, file_path)
             
             # 更新序列号（记录最新下载的视频）
-            update_sequence(video_id, prompt_content, prompt_content_cn)
+            update_sequence(TARGET_CATEGORY, video_id, prompt_content, prompt_content_cn)
             
             # 显示翻译后的中文 Prompt
             print(f"📝 中文 Prompt: {prompt_content_cn}")
@@ -342,21 +385,21 @@ def main():
             print("⚠️  下载失败，跳过该视频")
             failed_count += 1
             # 即使失败也更新序列号，避免重复尝试同一个视频
-            update_sequence(video_id, prompt_content, None)
+            update_sequence(TARGET_CATEGORY, video_id, prompt_content, None)
     
-    # 6. 显示下载统计
+    # 7. 显示下载统计
     print("\n" + "=" * 80)
     print("📊 下载统计:")
     print(f"   ✅ 成功: {success_count} 个")
     print(f"   ❌ 失败: {failed_count} 个")
     
-    new_index = get_current_sequence()
-    print(f"   📈 总进度: {new_index}/{total_videos} ({int(new_index/total_videos*100)}%)")
+    new_index = get_current_sequence(TARGET_CATEGORY)
+    print(f"   📈 '{TARGET_CATEGORY}' 分类进度: {new_index}/{total_videos} ({int(new_index/total_videos*100)}%)")
     
     if new_index < total_videos:
         print(f"   💡 还有 {total_videos - new_index} 个视频待下载")
     else:
-        print("   🎉 所有视频已下载完成！")
+        print(f"   🎉 '{TARGET_CATEGORY}' 分类所有视频已下载完成！")
     print("=" * 80)
 
 
