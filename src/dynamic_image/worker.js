@@ -1,5 +1,6 @@
 /**
- * Cloudflare Worker: Kyureki Player Archive Searcher (Enhanced Parsing)
+ * Cloudflare Worker: Kyureki Finder (Yahoo! Japan Edition)
+ * 核心策略：利用日本雅虎的 site: 语法进行外部精准搜索
  */
 
 export default {
@@ -8,154 +9,101 @@ export default {
     const params = url.searchParams;
     const name = params.get("name");
 
+    const corsHeaders = {
+      "content-type": "application/json;charset=UTF-8",
+      "Access-Control-Allow-Origin": "*"
+    };
+
     if (!name) {
-      return new Response(JSON.stringify({ error: "请提供 name 参数" }), {
-        status: 400,
-        headers: { "content-type": "application/json;charset=UTF-8" },
-      });
+      return new Response(JSON.stringify({ error: "请提供 name 参数" }), { status: 400, headers: corsHeaders });
     }
 
     try {
-      // === 第一步：使用搜索引擎 (DuckDuckGo Lite) 查找 kyureki.com 链接 ===
-      // (这一步保持不变，依然利用搜索引擎的容错能力)
+      // 构造 Yahoo! Japan 搜索链接
+      // 使用 site:kyureki.com 强制限定在球历网内搜索
       const searchQuery = `${name} site:kyureki.com`;
-      const searchUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(searchQuery)}`;
+      const searchUrl = `https://search.yahoo.co.jp/search?p=${encodeURIComponent(searchQuery)}`;
+
+      console.log(`正在尝试 Yahoo! Japan 搜索: ${searchUrl}`);
 
       const searchRes = await fetch(searchUrl, {
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-          "Accept-Language": "ja-JP"
+          // 模拟常见的 Windows Chrome 浏览器
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+          "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+          "Referer": "https://www.yahoo.co.jp/"
         }
       });
 
       let playerUrl = null;
+
+      // 解析 Yahoo 结果
+      // 雅虎的真实链接有时会包裹在重定向里，但通常 href 还是会包含目标域名的
       await new HTMLRewriter()
-        .on('a.result-link', {
+        .on('a', {
           element(element) {
             const href = element.getAttribute("href");
-            if (!playerUrl && href && href.includes("kyureki.com/player/")) {
-              playerUrl = href;
+
+            // 核心判断：链接里必须包含 "kyureki.com/player/"
+            // 且过滤掉 Yahoo 自身的缓存链接 (cache.yahoofs.jp)
+            if (!playerUrl && href && href.includes("kyureki.com/player/") && !href.includes("cache.yahoofs")) {
+
+              // 简单清洗：有时候 Yahoo 会把链接编码，尝试解码一下
+              try {
+                  const decoded = decodeURIComponent(href);
+                  // 有些 Yahoo 链接是 /RU=aHR0cHM... 这种加密格式，
+                  // 但如果 href 直接包含明文 kyureki.com 最好。
+                  // 如果是 Yahoo 的跳转链接 (r.yahoo.co.jp)，我们很难在 Worker 里解开，
+                  // 但通常 Yahoo 搜索结果标题的 href 是直链。
+                  playerUrl = href;
+              } catch (e) {
+                  playerUrl = href;
+              }
             }
           }
         })
         .transform(searchRes)
         .text();
 
+      // 如果 Yahoo 没找到，或者被拦截了
       if (!playerUrl) {
-        return new Response(JSON.stringify({ error: "未找到该球员主页", query: searchQuery }), { status: 404 });
+        // 这里我们可以打印一下 Yahoo 返回了什么状态，方便调试
+        console.log("Yahoo Search Status:", searchRes.status);
+        return new Response(JSON.stringify({
+            error: "未找到该球员主页",
+            source: "Yahoo! Japan",
+            details: "可能是没有收录，或者 Yahoo 拦截了 Cloudflare IP"
+        }), { status: 404, headers: corsHeaders });
       }
 
-      // === 第二步：获取 Archive.org 链接 ===
+      console.log("Yahoo 找到了链接:", playerUrl);
+
+      // ============================================================
+      // 获取 Archive 链接 (标准流程)
+      // ============================================================
       const archiveApiUrl = `https://archive.org/wayback/available?url=${playerUrl}`;
       const archiveApiRes = await fetch(archiveApiUrl);
       const archiveData = await archiveApiRes.json();
 
-      if (!archiveData.archived_snapshots || !archiveData.archived_snapshots.closest) {
-        return new Response(JSON.stringify({ error: "Wayback Machine 无存档", original_url: playerUrl }), { status: 404 });
+      let archiveUrl = null;
+      if (archiveData.archived_snapshots && archiveData.archived_snapshots.closest) {
+        archiveUrl = archiveData.archived_snapshots.closest.url;
       }
-      const archiveUrl = archiveData.archived_snapshots.closest.url;
 
-
-      // === 第三步：获取并精细解析 HTML 内容 ===
-      const contentRes = await fetch(archiveUrl, {
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1)" }
-      });
-
-      // 数据容器
-      let result = {
+      // 返回结果
+      return new Response(JSON.stringify({
         name: name,
-        source: "kyureki.com (Archive)",
-        url: archiveUrl,
-        profile: {},
-        history: [],   // 对应“全国大会”
-        raw_resume: "" // 对应可能存在的“经歴”
-      };
-
-      // 解析状态变量
-      let currentKey = "";
-      let tempVal = "";
-
-      await new HTMLRewriter()
-        // 1. 抓取名字 (通常在 h1)
-        .on('h1', {
-           text(chunk) { if(chunk.text.trim()) result.name = chunk.text.trim(); }
-        })
-        // 2. 遇到新的一行 tr，重置临时变量
-        .on('tbody tr', {
-          element(el) {
-            currentKey = "";
-            tempVal = "";
-          }
-        })
-        // 3. 抓取 Key (第一列)
-        .on('tbody tr td:nth-child(1)', {
-          text(chunk) {
-            // 累加文本（去除空白），例如 <b>世代</b> -> "世代"
-            const text = chunk.text.trim();
-            if (text) currentKey += text;
-          }
-        })
-        // 4. 抓取 Value (第二列) 的文本内容
-        .on('tbody tr td:nth-child(2)', {
-          text(chunk) {
-            // 累加文本，保留之前的空格以防粘连
-            if (currentKey && chunk.text) {
-                // 直接写入 result 对象，实现流式更新
-                // 如果是第一次写入，初始化；否则追加
-                if (!result.profile[currentKey]) result.profile[currentKey] = "";
-                result.profile[currentKey] += chunk.text;
-            }
-          }
-        })
-        // 5. 【关键】遇到 <br> 标签时，手动插入换行符
-        // 这样 "EventA<br>EventB" 就会变成 "EventA\nEventB"
-        .on('tbody tr td:nth-child(2) br', {
-          element(el) {
-             if (currentKey && result.profile[currentKey]) {
-                 result.profile[currentKey] += "\n";
-             }
-          }
-        })
-        .transform(contentRes)
-        .text();
-
-      // === 第四步：数据清洗与格式化 ===
-      // 在流式解析结束后，我们需要对数据进行清理，特别是把“全国大会”从 profile 移到 history
-
-      const finalProfile = {};
-
-      for (const [key, value] of Object.entries(result.profile)) {
-          // 清理多余的空白字符，但保留换行符
-          let cleanValue = value.replace(/[ \t]+/g, " ").trim();
-
-          if (key.includes("全国大会")) {
-              // 处理全国大会：按换行符分割成数组
-              result.history = cleanValue
-                  .split("\n")
-                  .map(s => s.trim())
-                  .filter(s => s.length > 0); // 过滤空行
-          }
-          else if (key.includes("経歴") || key.includes("球歴")) {
-              // 处理履历路径
-              result.raw_resume = cleanValue;
-          }
-          else {
-              // 普通资料
-              finalProfile[key] = cleanValue;
-          }
-      }
-
-      result.profile = finalProfile;
-
-      return new Response(JSON.stringify(result), {
-        headers: {
-          "content-type": "application/json;charset=UTF-8",
-          "Access-Control-Allow-Origin": "*"
-        },
+        source: "Yahoo! Japan",
+        url: archiveUrl,             // 如果有存档，则是存档链接
+        original_url: playerUrl,     // 哪怕没存档，至少你可以拿到原链接
+        has_archive: !!archiveUrl
+      }), {
+        headers: corsHeaders,
       });
 
     } catch (e) {
-      return new Response(JSON.stringify({ error: "Worker Error", details: e.message }), { status: 500 });
+      return new Response(JSON.stringify({ error: "Worker Error", details: e.message }), { status: 500, headers: corsHeaders });
     }
   },
 };
