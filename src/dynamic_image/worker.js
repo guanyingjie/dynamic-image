@@ -1,7 +1,11 @@
 /**
- * Cloudflare Worker: Kyureki Finder (Yahoo! Japan Edition)
- * 核心策略：利用日本雅虎的 site: 语法进行外部精准搜索
+ * Cloudflare Worker: Kyureki Finder (Google API Edition)
+ * 核心逻辑：使用 Google 官方 API，彻底解决 403/WAF 封锁问题
  */
+
+// 🔴 必须替换这里的内容 🔴
+const GOOGLE_API_KEY = "AIzaSyB_ClNsdqcSQTykK7qVNyIccDWDIbC4bTs";
+const GOOGLE_CX_ID = "e5d247b3ac13f4d63";
 
 export default {
   async fetch(request, env, ctx) {
@@ -9,6 +13,7 @@ export default {
     const params = url.searchParams;
     const name = params.get("name");
 
+    // 允许跨域
     const corsHeaders = {
       "content-type": "application/json;charset=UTF-8",
       "Access-Control-Allow-Origin": "*"
@@ -19,84 +24,64 @@ export default {
     }
 
     try {
-      // 构造 Yahoo! Japan 搜索链接
-      // 使用 site:kyureki.com 强制限定在球历网内搜索
-      const searchQuery = `${name} site:kyureki.com`;
-      const searchUrl = `https://search.yahoo.co.jp/search?p=${encodeURIComponent(searchQuery)}`;
+      console.log(`[Google API] 正在搜索: ${name}`);
 
-      console.log(`正在尝试 Yahoo! Japan 搜索: ${searchUrl}`);
+      // 1. 构造 Google API 请求
+      // num=1: 我们只需要第1个结果
+      const googleApiUrl = `https://www.googleapis.com/customsearch/v1?key=${GOOGLE_API_KEY}&cx=${GOOGLE_CX_ID}&q=${encodeURIComponent(name)}&num=1`;
 
-      const searchRes = await fetch(searchUrl, {
-        headers: {
-          // 模拟常见的 Windows Chrome 浏览器
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-          "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
-          "Referer": "https://www.yahoo.co.jp/"
-        }
-      });
+      const googleRes = await fetch(googleApiUrl);
 
+      if (!googleRes.ok) {
+        // 如果 API 配置错或者额度超了，这里会报错
+        const errText = await googleRes.text();
+        console.error("Google API Error:", errText);
+        return new Response(JSON.stringify({ error: "Search Service Error", details: "API Key配置错误或额度耗尽" }), { status: 500, headers: corsHeaders });
+      }
+
+      const data = await googleRes.json();
       let playerUrl = null;
 
-      // 解析 Yahoo 结果
-      // 雅虎的真实链接有时会包裹在重定向里，但通常 href 还是会包含目标域名的
-      await new HTMLRewriter()
-        .on('a', {
-          element(element) {
-            const href = element.getAttribute("href");
+      // 2. 提取链接
+      if (data.items && data.items.length > 0) {
+        const firstResult = data.items[0];
+        // 确保结果是球员页 (包含 /player/)
+        if (firstResult.link && firstResult.link.includes("/player/")) {
+           playerUrl = firstResult.link;
+        }
+      }
 
-            // 核心判断：链接里必须包含 "kyureki.com/player/"
-            // 且过滤掉 Yahoo 自身的缓存链接 (cache.yahoofs.jp)
-            if (!playerUrl && href && href.includes("kyureki.com/player/") && !href.includes("cache.yahoofs")) {
-
-              // 简单清洗：有时候 Yahoo 会把链接编码，尝试解码一下
-              try {
-                  const decoded = decodeURIComponent(href);
-                  // 有些 Yahoo 链接是 /RU=aHR0cHM... 这种加密格式，
-                  // 但如果 href 直接包含明文 kyureki.com 最好。
-                  // 如果是 Yahoo 的跳转链接 (r.yahoo.co.jp)，我们很难在 Worker 里解开，
-                  // 但通常 Yahoo 搜索结果标题的 href 是直链。
-                  playerUrl = href;
-              } catch (e) {
-                  playerUrl = href;
-              }
-            }
-          }
-        })
-        .transform(searchRes)
-        .text();
-
-      // 如果 Yahoo 没找到，或者被拦截了
       if (!playerUrl) {
-        // 这里我们可以打印一下 Yahoo 返回了什么状态，方便调试
-        console.log("Yahoo Search Status:", searchRes.status);
         return new Response(JSON.stringify({
-            error: "未找到该球员主页",
-            source: "Yahoo! Japan",
-            details: "可能是没有收录，或者 Yahoo 拦截了 Cloudflare IP"
+          error: "未找到该球员",
+          source: "Google API",
+          details: "Google 收录中未找到匹配结果"
         }), { status: 404, headers: corsHeaders });
       }
 
-      console.log("Yahoo 找到了链接:", playerUrl);
+      console.log(`[Google API] 找到链接: ${playerUrl}`);
 
-      // ============================================================
-      // 获取 Archive 链接 (标准流程)
-      // ============================================================
-      const archiveApiUrl = `https://archive.org/wayback/available?url=${playerUrl}`;
-      const archiveApiRes = await fetch(archiveApiUrl);
-      const archiveData = await archiveApiRes.json();
-
+      // 3. (可选) 获取 Wayback Machine 存档
+      // 这一步通常不会被封，Archive.org 很开放
       let archiveUrl = null;
-      if (archiveData.archived_snapshots && archiveData.archived_snapshots.closest) {
-        archiveUrl = archiveData.archived_snapshots.closest.url;
+      try {
+        const archiveApiUrl = `https://archive.org/wayback/available?url=${playerUrl}`;
+        const archiveRes = await fetch(archiveApiUrl);
+        const archiveData = await archiveRes.json();
+        if (archiveData.archived_snapshots && archiveData.archived_snapshots.closest) {
+          archiveUrl = archiveData.archived_snapshots.closest.url;
+        }
+      } catch (e) {
+        console.error("Archive Check Failed:", e);
+        // Archive 失败不影响主流程
       }
 
-      // 返回结果
+      // 4. 返回成功结果
       return new Response(JSON.stringify({
         name: name,
-        source: "Yahoo! Japan",
-        url: archiveUrl,             // 如果有存档，则是存档链接
-        original_url: playerUrl,     // 哪怕没存档，至少你可以拿到原链接
+        source: "Google API",
+        url: archiveUrl,           // 优先展示存档
+        original_url: playerUrl,   // 原链接
         has_archive: !!archiveUrl
       }), {
         headers: corsHeaders,
