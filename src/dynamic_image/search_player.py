@@ -59,4 +59,10 @@ def display_result(data):
 
 if __name__ == "__main__":
     # 直接输入名字即可
-    search_player("佐藤龍月")
+    # search_player("箱山遥人")
+    # search_player("清宫幸太郎")
+    # search_player("末吉良丞")
+    # search_player("宗山塁")
+    search_player("横山悠")
+    # search_player("织田翔希")
+    # search_player("石田雄星")
