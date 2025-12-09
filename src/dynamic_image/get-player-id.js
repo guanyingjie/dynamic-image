@@ -11,7 +11,7 @@ const CN_JP_MAP = {
   // --- 顶级高频 (姓氏/名字核心字) ---
   '泽': '沢', '岛': '島', '广': '広', '边': '辺', '齐': '斉',
   '斋': '斎', '滨': '浜', '关': '関', '冈': '岡', '宫': '宮',
-  '泷': '滝', '荣': '栄', '卫': '衛', '礼': '禮', '万': '萬',
+  '泷': '滝', '荣': '栄', '卫': '衛', '礼': '禮', '万': '萬','垒':'塁',
 
   // --- 名字常用形容词/名词 ---
   '气': '気', '实': '実', '惠': '恵', '丰': '豊', '乐': '楽',
@@ -97,6 +97,7 @@ export default {
       // 1. 构造 Google API 请求
       const googleApiUrl = `https://www.googleapis.com/customsearch/v1?key=${GOOGLE_API_KEY}&cx=${GOOGLE_CX_ID}&q=${encodeURIComponent(searchName)}&num=1`;
 
+      console.log(`Google API URL: ${googleApiUrl}`);
       const googleRes = await fetch(googleApiUrl);
 
       if (!googleRes.ok) {
@@ -106,17 +107,35 @@ export default {
       }
 
       const data = await googleRes.json();
-      let playerUrl = null;
+      let finalPlayerUrl = null;
+      let rawFoundUrl = null;
 
-      // 2. 提取链接
+      // 4. ⚡️ 核心逻辑：遍历结果，强制提取 ID 并重组 URL ⚡️
       if (data.items && data.items.length > 0) {
-        const firstResult = data.items[0];
-        if (firstResult.link && firstResult.link.includes("/player/")) {
-           playerUrl = firstResult.link;
+        // 遍历所有返回结果 (防止第一个是无ID的新闻页)
+        for (const item of data.items) {
+          const rawUrl = item.link;
+
+          // 正则匹配 ID
+          // 兼容: /player/12345, /keiyaku/p12345, /score/12345
+          // 逻辑: 域名后 -> 任意路径 -> (可选p) -> 连续数字 -> (可选/)
+          const match = rawUrl.match(/kyureki\.com\/[a-z]+\/(?:p)?(\d+)\/?/);
+
+          if (match && match[1]) {
+            // 找到了 ID！
+            const playerId = match[1];
+
+            // 强制重组为标准档案页
+            finalPlayerUrl = `https://www.kyureki.com/player/${playerId}/`;
+            rawFoundUrl = rawUrl; // 记录一下是从哪个链接提取的
+
+            console.log(`[ID Extraction] Found ID ${playerId} in ${rawUrl} -> ${finalPlayerUrl}`);
+            break; // 找到一个就收工，不再看后面的结果
+          }
         }
       }
 
-      if (!playerUrl) {
+      if (!finalPlayerUrl) {
         // 未找到结果的响应不应该缓存太久，避免短期内重复请求失败。
         const notFoundResponse = new Response(JSON.stringify({
           error: "未找到该球员",
@@ -130,12 +149,12 @@ export default {
         return notFoundResponse;
       }
 
-      console.log(`[Google API] 找到链接: ${playerUrl}`);
+      console.log(`[Google API] 找到链接: ${finalPlayerUrl}`);
 
       // 3. (可选) 获取 Wayback Machine 存档
       let archiveUrl = null;
       try {
-        const archiveApiUrl = `https://archive.org/wayback/available?url=${playerUrl}`;
+        const archiveApiUrl = `https://archive.org/wayback/available?url=${finalPlayerUrl}`;
         const archiveRes = await fetch(archiveApiUrl);
         const archiveData = await archiveRes.json();
         if (archiveData.archived_snapshots && archiveData.archived_snapshots.closest) {
@@ -151,7 +170,8 @@ export default {
         name: name,
         source: "Google API",
         url: archiveUrl,           // 优先展示存档
-        original_url: playerUrl,   // 原链接
+        original_url: finalPlayerUrl,   // 原链接
+        extracted_from: rawFoundUrl,
         has_archive: !!archiveUrl
       });
 
