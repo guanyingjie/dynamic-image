@@ -151,17 +151,22 @@ export default {
 
       console.log(`[Google API] 找到链接: ${finalPlayerUrl}`);
 
-      // 3. (可选) 获取 Wayback Machine 存档
       let archiveUrl = null;
       try {
         const archiveApiUrl = `https://archive.org/wayback/available?url=${finalPlayerUrl}`;
-        const archiveRes = await fetch(archiveApiUrl);
+        const archiveRes = await fetch(archiveApiUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          }
+        });
+        // const archiveRes = await fetch(archiveApiUrl);
         const archiveData = await archiveRes.json();
         if (archiveData.archived_snapshots && archiveData.archived_snapshots.closest) {
           archiveUrl = archiveData.archived_snapshots.closest.url;
         }
       } catch (e) {
         console.error("Archive Check Failed:", e);
+        return new Response(JSON.stringify({ error: "Can't get archive link", details: e.message }), { status: 500, headers: corsHeaders });
         // Archive 失败不影响主流程
       }
 
