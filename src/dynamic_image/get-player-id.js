@@ -160,7 +160,9 @@ export default {
           }
         });
         // const archiveRes = await fetch(archiveApiUrl);
+        console.log(`[Wayback Check] HTTP Status: ${archiveRes.status}`);
         const archiveData = await archiveRes.json();
+        console.log(`[Wayback Check] API Raw Response: ${JSON.stringify(archiveData)}`);
         if (archiveData.archived_snapshots && archiveData.archived_snapshots.closest) {
           archiveUrl = archiveData.archived_snapshots.closest.url;
         }
@@ -179,6 +181,7 @@ export default {
         extracted_from: rawFoundUrl,
         has_archive: !!archiveUrl
       });
+      console.log(`success get archive url ${archiveUrl}`)
 
       // 构造最终响应，并添加缓存头
       const finalResponse = new Response(responseBody, {

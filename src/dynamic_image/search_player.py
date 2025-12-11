@@ -31,38 +31,15 @@ def display_result(data):
     print(f"   (来源: {data.get('source')} | URL: {data.get('url')})")
     print("━" * 50)
 
-    # 1. 打印基本资料 (Profile)
-    if 'profile' in data:
-        for k, v in data['profile'].items():
-            # ljust 对齐需要考虑到中文宽度，这里简单处理，你可以优化
-            print(f"{k}: {v}")
-
-    print("-" * 50)
-
-    # 2. 打印履历/全国大会 (History)
-    if data.get('history') and len(data['history']) > 0:
-        print("【 🏆 参赛/履历记录 】")
-        for item in data['history']:
-            print(f"  • {item}")
-
-    # 3. 打印原始履历 (Raw Resume) 并尝试画图
-    elif data.get('raw_resume'):
-        print("【 📅 职业路径 】")
-        parts = data['raw_resume'].replace("＞", ">").split(">")
-        for i, part in enumerate(parts):
-            arrow = "  ▼" if i > 0 else "START"
-            if i > 0: print(arrow)
-            print(f"  │  {part.strip()}")
-
     print("━" * 50 + "\n")
+    print(data)
 
 
 if __name__ == "__main__":
-    # 直接输入名字即可
-    # search_player("箱山遥人")
+    search_player("箱山遥人")
     # search_player("清宫幸太郎")
     # search_player("末吉良丞")
     # search_player("宗山塁")
-    search_player("横山悠")
+    # search_player("横山悠")
     # search_player("织田翔希")
     # search_player("石田雄星")
